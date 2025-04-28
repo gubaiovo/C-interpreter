@@ -8,3 +8,6 @@ A simple C interpreter
 ❯ ./cc cc.c cc.c helloworld.c
 ```
 
+# Reference
+
+https://github.com/rswier/c4
