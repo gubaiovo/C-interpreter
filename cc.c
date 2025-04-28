@@ -14,9 +14,7 @@ int *text,            // text segment
     *stack;           // stack
 char *data;           // data segment
 
-// types of variable/function
-enum { CHAR, INT, PTR };
-int *idmain;                  // the `main` function
+int *idmain;          // the `main` function
 
 // virtual machine registers
 // pc: next command to execute
@@ -24,7 +22,13 @@ int *idmain;                  // the `main` function
 // sp: stack pointer
 // ax: the result of last operation
 int *pc, *bp, *sp, ax, cycle; 
+int index_of_bp; // index of bp pointer on stack
 
+int basetype;    // the type of a declaration, make it global for convenience
+int expr_type;   // the type of an expression
+
+// types of variable/function
+enum { CHAR, INT, PTR };
 
 // instructions
 enum { LEA ,IMM ,JMP ,CALL,JZ  ,JNZ ,ENT ,ADJ ,LEV ,LI  ,LC  ,SI  ,SC  ,PUSH,
@@ -44,6 +48,59 @@ int *current_id,              // current parsed ID
 
 // fields of identifier
 enum {Token, Hash, Name, Type, Class, Value, BType, BClass, BValue, IdSize};
+
+void next(); // get next token
+void expression(int level); // _
+void program(); // the entry point of the syntactic analysis
+void global_declaration(); // global declaration
+int eval(); // the entry point of the semantic analysis and evaluation
+void allocate_virtual_machine_memory(); // allocate memory for virtual machine
+void init_virtual_machine_registers(); // initialize registers for virtual machine
+void addKeyword(int i); // add keywords to symbol table
+void addLib(int i); // add library functions to symbol table
+void enum_declaration(); // enum declaration
+void function_declaration(); // function declaration
+void function_parameter(); // function parameter
+void function_body(); // function body
+void match(int tk); // match current token with expected token
+
+int main(int argc, char **argv)
+{
+    int i, fd;
+
+    argc--;
+    argv++;
+
+    poolsize = 256 * 1024; // arbitrary size
+    line = 1;
+
+    if ((fd = open(*argv, 0)) < 0) {
+        printf("could not open(%s)\n", *argv);
+        return -1;
+    }
+
+    if (!(src = old_src = malloc(poolsize))) {
+        printf("could not malloc(%d) for source area\n", poolsize);
+        return -1;
+    }
+
+    // read the source file
+    if ((i = read(fd, src, poolsize-1)) <= 0) {
+        printf("read() returned %d\n", i);
+        return -1;
+    }
+    src[i] = 0; // add EOF character
+    close(fd);
+
+    allocate_virtual_machine_memory();
+    init_virtual_machine_registers();
+    addKeyword(i);
+    addLib(i);
+    
+    program();
+    return eval();
+}
+
 
 void next() {
     char *last_pos;
@@ -262,6 +319,14 @@ void next() {
     return;
 }
 
+void match(int tk){
+    if (token != tk) {
+        printf("%d: expected %c, got %c\n", line, tk, token);
+        exit(-1);
+    }
+    next();
+}
+
 void expression(int level) {
 
 }
@@ -269,11 +334,9 @@ void expression(int level) {
 void program() {
     next();
     while (token > 0) {
-        printf("token is: %c\n", token);
-        next();
+        global_declaration();
     }
 }
-
 
 int eval() {
     int op, *tmp;
@@ -333,7 +396,6 @@ int eval() {
     return 0;
 }
 
-
 // allocate memory for virtual machine
 void allocate_virtual_machine_memory() {
     if (!(text = old_text = malloc(poolsize))) {
@@ -354,7 +416,6 @@ void allocate_virtual_machine_memory() {
     memset(symbols, 0, poolsize);
 }
 
-
 // initialize virtual machine registers
 void init_virtual_machine_registers() {
     
@@ -362,39 +423,8 @@ void init_virtual_machine_registers() {
     ax = 0;
 }
 
-
-
-int main(int argc, char **argv)
-{
-    int i, fd;
-
-    argc--;
-    argv++;
-
-    poolsize = 256 * 1024; // arbitrary size
-    line = 1;
-
-    if ((fd = open(*argv, 0)) < 0) {
-        printf("could not open(%s)\n", *argv);
-        return -1;
-    }
-
-    if (!(src = old_src = malloc(poolsize))) {
-        printf("could not malloc(%d) for source area\n", poolsize);
-        return -1;
-    }
-
-    // read the source file
-    if ((i = read(fd, src, poolsize-1)) <= 0) {
-        printf("read() returned %d\n", i);
-        return -1;
-    }
-    src[i] = 0; // add EOF character
-    close(fd);
-
-    allocate_virtual_machine_memory();
-    init_virtual_machine_registers();
-
+// add keywords to symbol table
+void addKeyword(int i) {
     src = "char else enum if int return sizeof while"
           "open read close printf malloc memset memcmp exit void main";
     // add keywords to symbol table
@@ -403,6 +433,10 @@ int main(int argc, char **argv)
         next();
         current_id[Token] = i++;
     }
+}
+
+// add lib
+void addLib(int i) {
     // add lib to symbol table
     i = OPEN;
     while (i <= EXIT) {
@@ -414,19 +448,226 @@ int main(int argc, char **argv)
 
     next(); current_id[Token] = Char;// handle void type
     next(); idmain = current_id;// keep track of `main`
+}
+
+void global_declaration() {
+    int type; // tmp, actual type for variable
+    int i; // tmp
+
+    basetype = INT;
+
+    // parse enum, this should be treated alone.
+    if (token == Enum) {
+        // enum [id] { a = 10, b = 20, ... }
+        match(Enum);
+        if (token != '{') {
+            match(Id); // skip the [id] part
+        }
+        if (token == '{') {
+            // parse the assign part
+            match('{');
+            enum_declaration();
+            match('}');
+        }
+
+        match(';');
+        return;
+    }
+
+    // parse type information
+    if (token == Int) {
+        match(Int);
+    }
+    else if (token == Char) {
+        match(Char);
+        basetype = CHAR;
+    }
+
+    // parse the comma seperated variable declaration.
+    while (token != ';' && token != '}') {
+        type = basetype;
+        // parse pointer type, note that there may exist `int ****x;`
+        while (token == Mul) {
+            match(Mul);
+            type = type + PTR;
+        }
+
+        if (token != Id) {
+            // invalid declaration
+            printf("%d: bad global declaration\n", line);
+            exit(-1);
+        }
+        if (current_id[Class]) {
+            // identifier exists
+            printf("%d: duplicate global declaration\n", line);
+            exit(-1);
+        }
+        match(Id);
+        current_id[Type] = type;
+
+        if (token == '(') {
+            current_id[Class] = Fun;
+            current_id[Value] = (int)(text + 1); // the memory address of function
+            function_declaration();
+        } else {
+            // variable declaration
+            current_id[Class] = Glo; // global variable
+            current_id[Value] = (int)data; // assign memory address
+            data = data + sizeof(int);
+        }
+
+        if (token == ',') {
+            match(',');
+        }
+    }
+    next();
+}
+void enum_declaration() {
+    // parse enum [id] { a = 10, b = 20, ... }
+    int i = 0;
+    while (token != '}') {
+        if (token != Id) {
+            printf("%d: bad enum identifier %d\n", line, token);
+            exit(-1);
+        }
+        next();
+        if (token == Assign) {
+            // like {a=10}
+            next();
+            if (token != Num) {
+                printf("%d: bad enum initializer\n", line);
+                exit(-1);
+            }
+            i = token_val;
+            next();
+        }
+
+        current_id[Class] = Num;
+        current_id[Type] = INT;
+        current_id[Value] = i++;
+
+        if (token == ',') {
+            next();
+        }
+    }   
+}
+
+void function_declaration() {
+    match('(');
+    function_parameter();
+    match(')');
+    match('{');
+    function_body();
+    // unwind local variable declarations for all local variables.
+    current_id = symbols;
+    while (current_id[Token]) {
+        if (current_id[Class] == Loc) {
+            current_id[Class] = current_id[BClass];
+            current_id[Type]  = current_id[BType];
+            current_id[Value] = current_id[BValue];
+        }
+        current_id = current_id + IdSize;
+    }
+}
 
 
-    i = 0;
-    text[i++] = IMM;
-    text[i++] = 10;
-    text[i++] = PUSH;
-    text[i++] = IMM;
-    text[i++] = 20;
-    text[i++] = ADD;
-    text[i++] = PUSH;
-    text[i++] = EXIT;
-    pc = text;
-    
-    program();
-    return eval();
+
+void function_parameter() {
+    int type;
+    int params;
+    params = 0;
+    while (token != ')') {
+
+        // parse type information
+        type = INT;
+        if (token == Int) {
+            match(Int);
+        } else if (token == Char) {
+            type = CHAR;
+            match(Char);
+        }
+
+        // pointer type
+        while (token == Mul) {
+            match(Mul);
+            type = type + PTR;
+        }
+
+        // parameter name
+        if (token != Id) {
+            printf("%d: bad parameter declaration\n", line);
+            exit(-1);
+        }
+        if (current_id[Class] == Loc) {
+            printf("%d: duplicate parameter declaration\n", line);
+            exit(-1);
+        }
+
+        match(Id);
+
+        // store the local variable
+        current_id[BClass] = current_id[Class]; current_id[Class]  = Loc;
+        current_id[BType]  = current_id[Type];  current_id[Type]   = type;
+        current_id[BValue] = current_id[Value]; current_id[Value]  = params++;   // index of current parameter
+
+        if (token == ',') {
+            match(',');
+        }
+    }
+
+    index_of_bp = params+1;
+}
+void function_body() {
+    int pos_local; // position of local variables on the stack.
+    int type;
+    pos_local = index_of_bp;
+
+    // local variable declarations
+    while (token == Int || token == Char) {
+        // local variable declaration, just like global ones.
+        basetype = (token == Int) ? INT : CHAR;
+        match(token);
+
+        while (token != ';') {
+            type = basetype;
+            while (token == Mul) {
+                match(Mul);
+                type = type + PTR;
+            }
+
+            if (token != Id) {
+                // invalid declaration
+                printf("%d: bad local declaration\n", line);
+                exit(-1);
+            }
+            if (current_id[Class] == Loc) {
+                // identifier exists
+                printf("%d: duplicate local declaration\n", line);
+                exit(-1);
+            }
+            match(Id);
+
+            // store the local variable
+            current_id[BClass] = current_id[Class]; current_id[Class]  = Loc;
+            current_id[BType]  = current_id[Type];  current_id[Type]   = type;
+            current_id[BValue] = current_id[Value]; current_id[Value]  = ++pos_local;   // index of current parameter
+
+            if (token == ',') {
+                match(',');
+            }
+        }
+        match(';');
+    }
+
+    // save the stack size for local variables
+    *++text = ENT;
+    *++text = pos_local - index_of_bp;
+
+    // statements
+    while (token != '}') {
+        statement();
+    }
+
+    // emit code for leaving the sub function
+    *++text = LEV;
 }
